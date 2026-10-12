@@ -1,0 +1,8 @@
+[tool.ruff]
+line-length = 160
+target-version = "py312"
+exclude = ["migrations"]
+
+[tool.ruff.lint]
+# Errors and pyflakes only (undefined names, unused imports, syntax): catches real bugs without style noise.
+select = ["E9", "F"]

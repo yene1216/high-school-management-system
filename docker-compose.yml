@@ -1,0 +1,59 @@
+# Local development stack: docker compose up --build
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-school}
+      POSTGRES_USER: ${POSTGRES_USER:-school}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-school}"]
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+
+  backend: &backend
+    build: ./backend
+    command: python manage.py runserver 0.0.0.0:8000
+    user: "${DEV_UID:-1000}:${DEV_GID:-1000}"   # so generated migration files are owned by you (export DEV_UID=$(id -u) DEV_GID=$(id -g))
+    env_file: .env
+    environment: &backend-env
+      POSTGRES_HOST: db
+      REDIS_URL: redis://redis:6379/0
+      CELERY_TASK_ALWAYS_EAGER: "false"
+      AUTO_MAKEMIGRATIONS: "1"
+      MEDIA_ROOT: /tmp/media
+      HOME: /tmp
+    volumes: ["./backend:/app"]
+    ports: ["8000:8000"]
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_started}
+
+  worker:
+    <<: *backend
+    command: celery -A config worker -l info
+    environment: {<<: *backend-env, RUN_MIGRATIONS: "0"}
+    ports: []
+
+  beat:
+    <<: *backend
+    command: celery -A config beat -l info
+    environment: {<<: *backend-env, RUN_MIGRATIONS: "0"}
+    ports: []
+
+  frontend:
+    image: node:22-alpine
+    working_dir: /app
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+    environment:
+      VITE_PROXY_TARGET: http://backend:8000
+    volumes: ["./frontend:/app"]
+    ports: ["5173:5173"]
+    depends_on: [backend]
+
+volumes:
+  pgdata:

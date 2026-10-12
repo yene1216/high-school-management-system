@@ -1,0 +1,78 @@
+# Production stack:  docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
+# Put a TLS terminator (cloud load balancer, Caddy, Traefik) in front of the `web` service on port 80.
+x-backend: &backend
+  build: ./backend
+  env_file: .env.production
+  restart: unless-stopped
+  environment: &backend-env
+    POSTGRES_HOST: db
+    REDIS_URL: redis://redis:6379/0
+    CELERY_TASK_ALWAYS_EAGER: "false"
+    DJANGO_DEBUG: "0"
+  volumes: [media:/data/media]
+  depends_on:
+    db: {condition: service_healthy}
+    redis: {condition: service_started}
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?}
+      POSTGRES_USER: ${POSTGRES_USER:?}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+
+  backend:
+    <<: *backend
+    # Web dyno: applies migrations, then serves. Scale workers via gunicorn --workers or replicas.
+
+  worker:
+    <<: *backend
+    command: celery -A config worker -l info --concurrency 4
+    environment: {<<: *backend-env, RUN_MIGRATIONS: "0"}
+    healthcheck: {disable: true}
+
+  beat:
+    <<: *backend
+    command: celery -A config beat -l info
+    environment: {<<: *backend-env, RUN_MIGRATIONS: "0"}
+    healthcheck: {disable: true}
+
+  web:
+    build: ./frontend
+    restart: unless-stopped
+    environment:
+      ADMIN_URL: ${ADMIN_URL:-admin/}
+    ports: ["80:80"]
+    depends_on: [backend]
+
+  backup:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "-c", "while true; do /scripts/backup.sh || echo 'BACKUP FAILED' >&2; sleep 86400; done"]
+    environment:
+      PGHOST: db
+      PGUSER: ${POSTGRES_USER}
+      PGDATABASE: ${POSTGRES_DB}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+      MEDIA_DIR: /data/media
+    volumes: [./scripts:/scripts:ro, backups:/backups, media:/data/media:ro]
+    depends_on:
+      db: {condition: service_healthy}
+
+volumes:
+  pgdata:
+  media:
+  backups:
